@@ -1,9 +1,12 @@
-name: Hourly Store Status Report
+name: Hourly Store Status Report 2.0
 
 on:
   schedule:
-    - cron: '0 6-21 * * *'    # every hour from 6 AM through 9 PM
-  workflow_dispatch:        # manual trigger
+    # UTC 22–23 → 06–07 PHT
+    - cron: '0 22-23 * * *'
+    # UTC 00–13 → 08–21 PHT
+    - cron: '0 0-13  * * *'
+  workflow_dispatch:
 
 jobs:
   report:
