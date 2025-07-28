@@ -16,7 +16,9 @@ load_dotenv()
 def clean_env_var(var_name, default=None):
     value = os.getenv(var_name, default)
     if value and value not in ['***', '', 'None', 'null']:
-        return value.strip().strip('"').strip("'")
+        # Strip all types of whitespace including newlines, tabs, etc.
+        cleaned = value.strip().strip('"').strip("'").strip()
+        return cleaned
     return default
 
 def get_int_env_var(var_name, default):
@@ -134,12 +136,25 @@ def test_smtp_connection():
         
         print(f"Testing SMTP connection to {SMTP_CONFIG['host']}:{SMTP_CONFIG['port']}...")
         with smtplib.SMTP(SMTP_CONFIG['host'], SMTP_CONFIG['port']) as s:
+            print("✓ SMTP server connection established")
             s.starttls()
+            print("✓ TLS encryption enabled")
             s.login(SMTP_CONFIG['user'], SMTP_CONFIG['pass'])
-            print("✓ SMTP connection and authentication successful")
+            print("✓ SMTP authentication successful")
             return True
     except socket.gaierror as e:
         print(f"✗ DNS resolution failed: {e}")
+        return False
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"✗ SMTP Authentication failed: {e}")
+        print("This usually means:")
+        print("  1. Incorrect username or password")
+        print("  2. For Gmail: You need to use an 'App Password' instead of your regular password")
+        print("  3. For Gmail: 2-Factor Authentication must be enabled to create App Passwords")
+        print("  4. The app password may have expired and needs to be regenerated")
+        print("  5. COMMON ISSUE: Extra whitespace (newlines/spaces) in the password")
+        print("  6. Check https://support.google.com/mail/?p=BadCredentials for more info")
+        print("\n🔧 TO FIX: Go to GitHub Secrets, clear SMTP_PASS completely, and paste ONLY the 16-character app password")
         return False
     except smtplib.SMTPException as e:
         print(f"✗ SMTP error: {e}")
