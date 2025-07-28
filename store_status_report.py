@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, json, requests, smtplib, argparse
+import os, json, requests, smtplib, argparse, socket
 from bs4 import BeautifulSoup
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -7,17 +7,30 @@ from email.header import Header
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from requests.exceptions import HTTPError
+import time
 
 # ─── Load ENV & Config ────────────────────────────────────────────────────────
 load_dotenv()
-TO_ADDRESS   = os.environ['TO_ADDRESS']
-FROM_ADDRESS = os.environ['SMTP_USER']
+
+# Strip quotes and whitespace from environment variables
+def clean_env_var(var_name, default=None):
+    value = os.getenv(var_name, default)
+    if value:
+        return value.strip().strip('"').strip("'")
+    return value
+
+TO_ADDRESS   = clean_env_var('TO_ADDRESS')
+FROM_ADDRESS = clean_env_var('SMTP_USER')
 SMTP_CONFIG  = {
-    'host': os.getenv('SMTP_HOST', 'smtp.gmail.com'),
-    'port': int(os.getenv('SMTP_PORT', 587)),
-    'user': os.environ['SMTP_USER'],
-    'pass': os.environ['SMTP_PASS'],
+    'host': clean_env_var('SMTP_HOST', 'smtp.gmail.com'),
+    'port': int(clean_env_var('SMTP_PORT', '587')),
+    'user': clean_env_var('SMTP_USER'),
+    'pass': clean_env_var('SMTP_PASS'),
 }
+
+# Debug print SMTP config (without password)
+print(f"SMTP Config - Host: '{SMTP_CONFIG['host']}', Port: {SMTP_CONFIG['port']}, User: '{SMTP_CONFIG['user']}'")
+
 # branch_urls.json must contain {"urls": [ "...", "..." ]}
 BRANCH_FILE = os.path.join(os.path.dirname(__file__), 'branch_urls.json')
 with open(BRANCH_FILE) as f:
@@ -35,26 +48,31 @@ HEADERS = {
 def check_store_online(url):
     if 'foodpanda.ph' in url:
         # use Playwright for FP
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page    = browser.new_page()
-            page.goto(url, timeout=60000)
-            # give it a moment to render dynamic overlays
-            page.wait_for_timeout(3000)
-            # detect a “closed” overlay
-            if ( page.query_selector("text=Temporarily unavailable") or
-                 page.query_selector("text=Closed for now")       or
-                 page.query_selector("text=Out of delivery area") ):
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page    = browser.new_page()
+                page.goto(url, timeout=60000)
+                # give it a moment to render dynamic overlays
+                page.wait_for_timeout(3000)
+                # detect a "closed" overlay
+                if ( page.query_selector("text=Temporarily unavailable") or
+                     page.query_selector("text=Closed for now")       or
+                     page.query_selector("text=Out of delivery area") ):
+                    browser.close()
+                    return False
                 browser.close()
-                return False
-            browser.close()
-            return True
+                return True
+        except Exception as e:
+            print(f"Playwright error for {url}: {e}")
+            return False
 
     # else: GrabFood
     try:
         r = requests.get(url, headers=HEADERS, timeout=10)
         r.raise_for_status()
-    except Exception:
+    except Exception as e:
+        print(f"Request error for {url}: {e}")
         return False
 
     soup = BeautifulSoup(r.text, 'html.parser')
@@ -87,43 +105,112 @@ def build_report(results):
 
     return "\n".join(lines)
 
-def send_email(subject, body):
-    msg = MIMEText(body, _charset='utf-8')
-    msg['Subject'] = Header(subject, 'utf-8')
-    msg['From']    = FROM_ADDRESS
-    msg['To']      = TO_ADDRESS
-    with smtplib.SMTP(SMTP_CONFIG['host'], SMTP_CONFIG['port']) as s:
-        s.starttls()
-        s.login(SMTP_CONFIG['user'], SMTP_CONFIG['pass'])
-        s.send_message(msg)
+def test_smtp_connection():
+    """Test SMTP connection with better error handling"""
+    try:
+        print(f"Testing DNS resolution for {SMTP_CONFIG['host']}...")
+        socket.gethostbyname(SMTP_CONFIG['host'])
+        print(f"✓ DNS resolution successful for {SMTP_CONFIG['host']}")
+        
+        print(f"Testing SMTP connection to {SMTP_CONFIG['host']}:{SMTP_CONFIG['port']}...")
+        with smtplib.SMTP(SMTP_CONFIG['host'], SMTP_CONFIG['port']) as s:
+            s.starttls()
+            s.login(SMTP_CONFIG['user'], SMTP_CONFIG['pass'])
+            print("✓ SMTP connection and authentication successful")
+            return True
+    except socket.gaierror as e:
+        print(f"✗ DNS resolution failed: {e}")
+        return False
+    except smtplib.SMTPException as e:
+        print(f"✗ SMTP error: {e}")
+        return False
+    except Exception as e:
+        print(f"✗ Connection error: {e}")
+        return False
+
+def send_email(subject, body, max_retries=3):
+    """Send email with retry mechanism"""
+    for attempt in range(max_retries):
+        try:
+            print(f"Email attempt {attempt + 1}/{max_retries}")
+            
+            # Test connection first
+            if not test_smtp_connection():
+                if attempt < max_retries - 1:
+                    print(f"Retrying in 10 seconds...")
+                    time.sleep(10)
+                    continue
+                else:
+                    raise Exception("SMTP connection failed after all retries")
+            
+            msg = MIMEText(body, _charset='utf-8')
+            msg['Subject'] = Header(subject, 'utf-8')
+            msg['From']    = FROM_ADDRESS
+            msg['To']      = TO_ADDRESS
+            
+            with smtplib.SMTP(SMTP_CONFIG['host'], SMTP_CONFIG['port']) as s:
+                s.starttls()
+                s.login(SMTP_CONFIG['user'], SMTP_CONFIG['pass'])
+                s.send_message(msg)
+                print(f"✅ Email sent successfully to {TO_ADDRESS}")
+                return True
+                
+        except Exception as e:
+            print(f"✗ Email attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                print(f"Retrying in 10 seconds...")
+                time.sleep(10)
+            else:
+                print(f"✗ All email attempts failed")
+                raise
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 def main(dry_run=False):
+    print(f"Starting CocoPan store status check...")
+    print(f"Checking {len(STORE_URLS)} stores...")
+    
     results = []
-    for url in STORE_URLS:
+    for i, url in enumerate(STORE_URLS, 1):
+        print(f"Checking store {i}/{len(STORE_URLS)}: {url}")
+        
         # extract a human name from <h1> or fallback to URL slug
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             r.raise_for_status()
-            txt = BeautifulSoup(r.text,'html.parser')\
-                    .select_one('h1')\
-                    .get_text(strip=True)
+            h1_tag = BeautifulSoup(r.text,'html.parser').select_one('h1')
+            txt = h1_tag.get_text(strip=True) if h1_tag else None
             name = txt if txt and txt.lower()!='403 error' else None
-        except:
+        except Exception as e:
+            print(f"  Error getting store name: {e}")
             name = None
+            
         if not name:
             slug = url.rstrip('/').split('/')[-1]
             name = slug.replace('-', ' ').title()
 
         online = check_store_online(url)
+        status = "ONLINE" if online else "OFFLINE"
+        print(f"  {name}: {status}")
         results.append((name, url, online))
 
     report = build_report(results)
+    print("\n" + "="*50)
+    print("REPORT GENERATED:")
+    print("="*50)
+    print(report)
+    print("="*50)
+    
     if dry_run:
-        print(report)
+        print("\n🔍 DRY RUN - Report would be emailed but not actually sent")
     else:
-        send_email("CocoPan Store Status Report", report)
-        print(f"✅ Report emailed to {TO_ADDRESS}")
+        print(f"\n📧 Sending email to {TO_ADDRESS}...")
+        try:
+            send_email("CocoPan Store Status Report", report)
+        except Exception as e:
+            print(f"✗ Failed to send email: {e}")
+            print("📄 Report content saved for debugging:")
+            print(report)
+            raise
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()

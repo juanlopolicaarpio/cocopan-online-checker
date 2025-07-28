@@ -11,10 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Change to code directory
-        run: cd cocopan-online-checker
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -28,13 +25,48 @@ jobs:
           pip install requests beautifulsoup4 python-dotenv playwright
           playwright install chromium
 
-      - name: Run store status report
+      - name: Test network connectivity
+        run: |
+          echo "Testing network connectivity..."
+          ping -c 3 google.com || echo "Ping to google.com failed"
+          nslookup smtp.gmail.com || echo "DNS lookup for smtp.gmail.com failed"
+          telnet smtp.gmail.com 587 || echo "Connection to smtp.gmail.com:587 failed"
+
+      - name: Debug environment variables
+        run: |
+          echo "Checking environment variables..."
+          echo "SMTP_HOST length: ${#SMTP_HOST}"
+          echo "SMTP_PORT length: ${#SMTP_PORT}"
+          echo "SMTP_USER length: ${#SMTP_USER}"
+          echo "TO_ADDRESS length: ${#TO_ADDRESS}"
+          # Don't print actual values for security
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
+
+      - name: Run store status report (dry run first)
         run: |
           cd cocopan-online-checker
+          echo "Running dry run first..."
+          python store_status_report.py --dry-run
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
+
+      - name: Run store status report (send email)
+        run: |
+          cd cocopan-online-checker
+          echo "Running actual report with email..."
           python store_status_report.py
         env:
-          SMTP_HOST:  ${{ secrets.SMTP_HOST }}
-          SMTP_PORT:  ${{ secrets.SMTP_PORT }}
-          SMTP_USER:  ${{ secrets.SMTP_USER }}
-          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
