@@ -1,10 +1,8 @@
-name: Hourly Store Status Report 2.0
+name: Hourly Store Status Report
 
 on:
   schedule:
-    # UTC 22–23 → 06–07 PHT
     - cron: '0 22-23 * * *'
-    # UTC 00–13 → 08–21 PHT
     - cron: '0 0-13  * * *'
   workflow_dispatch:
 
@@ -15,6 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      - name: Change to code directory
+        run: cd cocopan-online-checker
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -22,16 +23,18 @@ jobs:
 
       - name: Install dependencies
         run: |
+          cd cocopan-online-checker
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 python-dotenv playwright
           playwright install chromium
 
       - name: Run store status report
+        run: |
+          cd cocopan-online-checker
+          python store_status_report.py
         env:
           SMTP_HOST:  ${{ secrets.SMTP_HOST }}
           SMTP_PORT:  ${{ secrets.SMTP_PORT }}
           SMTP_USER:  ${{ secrets.SMTP_USER }}
           SMTP_PASS:  ${{ secrets.SMTP_PASS }}
           TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
-        run: |
-          python store_status_report.py
