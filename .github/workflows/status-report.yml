@@ -53,6 +53,17 @@ jobs:
           echo "Looking for Python files:"
           find . -name "*.py" -type f
 
+      - name: Test configuration and SMTP connection
+        run: |
+          echo "Testing configuration and SMTP connection..."
+          python store_status_report.py --test-config
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
+
       - name: Run store status report (dry run first)
         run: |
           echo "Running dry run first..."

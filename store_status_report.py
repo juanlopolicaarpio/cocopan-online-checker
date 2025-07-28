@@ -15,15 +15,35 @@ load_dotenv()
 # Strip quotes and whitespace from environment variables
 def clean_env_var(var_name, default=None):
     value = os.getenv(var_name, default)
-    if value:
+    if value and value not in ['***', '', 'None', 'null']:
         return value.strip().strip('"').strip("'")
-    return value
+    return default
+
+def get_int_env_var(var_name, default):
+    value = clean_env_var(var_name, str(default))
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        print(f"Warning: Could not convert {var_name}='{value}' to int, using default {default}")
+        return default
+
+# Check if required environment variables are available
+required_vars = ['TO_ADDRESS', 'SMTP_USER', 'SMTP_PASS', 'SMTP_HOST']
+missing_vars = []
+for var in required_vars:
+    if not os.getenv(var) or os.getenv(var) in ['***', '', 'None', 'null']:
+        missing_vars.append(var)
+
+if missing_vars:
+    print(f"Error: Missing required environment variables: {missing_vars}")
+    print("Please check your GitHub Secrets configuration.")
+    exit(1)
 
 TO_ADDRESS   = clean_env_var('TO_ADDRESS')
 FROM_ADDRESS = clean_env_var('SMTP_USER')
 SMTP_CONFIG  = {
     'host': clean_env_var('SMTP_HOST', 'smtp.gmail.com'),
-    'port': int(clean_env_var('SMTP_PORT', '587')),
+    'port': get_int_env_var('SMTP_PORT', 587),
     'user': clean_env_var('SMTP_USER'),
     'pass': clean_env_var('SMTP_PASS'),
 }
@@ -216,5 +236,16 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--dry-run", action="store_true",
                    help="Print the report instead of sending")
+    p.add_argument("--test-config", action="store_true",
+                   help="Test configuration and SMTP connection only")
     args = p.parse_args()
-    main(dry_run=args.dry_run)
+    
+    if args.test_config:
+        print("🔧 Testing configuration...")
+        if test_smtp_connection():
+            print("✅ Configuration test passed!")
+        else:
+            print("❌ Configuration test failed!")
+            exit(1)
+    else:
+        main(dry_run=args.dry_run)
