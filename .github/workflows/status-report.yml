@@ -20,7 +20,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          cd cocopan-online-checker
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 python-dotenv playwright
           playwright install chromium
@@ -30,7 +29,7 @@ jobs:
           echo "Testing network connectivity..."
           ping -c 3 google.com || echo "Ping to google.com failed"
           nslookup smtp.gmail.com || echo "DNS lookup for smtp.gmail.com failed"
-          telnet smtp.gmail.com 587 || echo "Connection to smtp.gmail.com:587 failed"
+          timeout 5 bash -c '</dev/tcp/smtp.gmail.com/587' || echo "Connection to smtp.gmail.com:587 failed"
 
       - name: Debug environment variables
         run: |
@@ -47,9 +46,15 @@ jobs:
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
 
+      - name: List files in repository
+        run: |
+          echo "Files in repository root:"
+          ls -la
+          echo "Looking for Python files:"
+          find . -name "*.py" -type f
+
       - name: Run store status report (dry run first)
         run: |
-          cd cocopan-online-checker
           echo "Running dry run first..."
           python store_status_report.py --dry-run
         env:
@@ -61,7 +66,6 @@ jobs:
 
       - name: Run store status report (send email)
         run: |
-          cd cocopan-online-checker
           echo "Running actual report with email..."
           python store_status_report.py
         env:
