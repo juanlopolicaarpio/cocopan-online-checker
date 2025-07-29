@@ -1,2 +1,8 @@
 requests
 beautifulsoup4
+python-dotenv
+playwright
+streamlit
+plotly
+pandas
+sqlite3
