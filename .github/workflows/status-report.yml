@@ -1,13 +1,16 @@
-name: Hourly Store Status Report
+name: CocoPan Store Monitor (6am-9pm) - Dashboard Only
 
 on:
   schedule:
-    - cron: '0 22-23 * * *'
-    - cron: '0 0-13  * * *'
+    # Run every hour from 6am to 9pm Manila time (UTC+8)
+    # Manila 6am = UTC 22:00 (previous day)  
+    # Manila 9pm = UTC 13:00 (same day)
+    - cron: '0 22-23 * * *'  # 6am-7am Manila time
+    - cron: '0 0-13 * * *'   # 8am-9pm Manila time
   workflow_dispatch:
 
 jobs:
-  report:
+  monitor-stores:
     runs-on: ubuntu-latest
 
     steps:
@@ -24,64 +27,87 @@ jobs:
           pip install requests beautifulsoup4 python-dotenv playwright
           playwright install chromium
 
-      - name: Test network connectivity
-        run: |
-          echo "Testing network connectivity..."
-          ping -c 3 google.com || echo "Ping to google.com failed"
-          nslookup smtp.gmail.com || echo "DNS lookup for smtp.gmail.com failed"
-          timeout 5 bash -c '</dev/tcp/smtp.gmail.com/587' || echo "Connection to smtp.gmail.com:587 failed"
+      - name: Download previous database (if exists)
+        uses: actions/download-artifact@v3
+        with:
+          name: store-database
+          path: .
+        continue-on-error: true
 
-      - name: Debug environment variables
+      - name: Run store monitoring and save to database
         run: |
-          echo "Checking environment variables..."
-          echo "SMTP_HOST length: ${#SMTP_HOST}"
-          echo "SMTP_PORT length: ${#SMTP_PORT}"
-          echo "SMTP_USER length: ${#SMTP_USER}"
-          echo "TO_ADDRESS length: ${#TO_ADDRESS}"
-          # Don't print actual values for security
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
-
-      - name: List files in repository
-        run: |
-          echo "Files in repository root:"
-          ls -la
-          echo "Looking for Python files:"
-          find . -name "*.py" -type f
-
-      - name: Test configuration and SMTP connection
-        run: |
-          echo "Testing configuration and SMTP connection..."
-          python store_status_report.py --test-config
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
-
-      - name: Run store status report (dry run first)
-        run: |
-          echo "Running dry run first..."
-          python store_status_report.py --dry-run
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
-
-      - name: Run store status report (send email)
-        run: |
-          echo "Running actual report with email..."
+          echo "🏪 Running hourly CocoPan store check..."
+          echo "⏰ Time: $(date)"
           python store_status_report.py
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          TO_ADDRESS: ${{ secrets.TO_ADDRESS }}
+
+      - name: Show monitoring summary
+        run: |
+          echo "📊 Latest monitoring summary:"
+          python -c "
+          import sqlite3
+          import os
+          if os.path.exists('store_status.db'):
+              conn = sqlite3.connect('store_status.db')
+              cursor = conn.cursor()
+              cursor.execute('SELECT * FROM summary_reports ORDER BY report_time DESC LIMIT 1')
+              result = cursor.fetchone()
+              if result:
+                  print(f'🏪 Total stores: {result[1]}')
+                  print(f'✅ Online: {result[2]}')
+                  print(f'❌ Offline: {result[3]}')
+                  print(f'📈 Uptime: {result[4]:.1f}%')
+              conn.close()
+          else:
+              print('❌ No database found')
+          "
+
+      - name: Upload database for next run
+        uses: actions/upload-artifact@v3
+        with:
+          name: store-database
+          path: store_status.db
+          retention-days: 30
+
+      - name: Display database stats
+        run: |
+          echo "📊 Database Statistics:"
+          python -c "
+          import sqlite3
+          import os
+          if os.path.exists('store_status.db'):
+              conn = sqlite3.connect('store_status.db')
+              cursor = conn.cursor()
+              cursor.execute('SELECT COUNT(*) FROM stores')
+              stores = cursor.fetchone()[0]
+              cursor.execute('SELECT COUNT(*) FROM status_checks')
+              checks = cursor.fetchone()[0]
+              cursor.execute('SELECT COUNT(DISTINCT DATE(checked_at)) FROM status_checks')
+              days = cursor.fetchone()[0]
+              print(f'📁 Total stores tracked: {stores}')
+              print(f'📈 Total checks performed: {checks}')
+              print(f'📅 Days of data: {days}')
+              conn.close()
+          "
+
+      - name: Show recent activity pattern
+        run: |
+          echo "⏰ Recent hourly pattern:"
+          python -c "
+          import sqlite3
+          import os
+          if os.path.exists('store_status.db'):
+              conn = sqlite3.connect('store_status.db')
+              cursor = conn.cursor()
+              cursor.execute('''
+                  SELECT strftime('%H', checked_at) as hour, COUNT(*) as checks
+                  FROM status_checks 
+                  WHERE checked_at >= datetime('now', '-24 hours')
+                  GROUP BY hour
+                  ORDER BY hour
+              ''')
+              results = cursor.fetchall()
+              for hour, checks in results:
+                  bar = '█' * min(checks // 5, 10)
+                  print(f'{hour}:00 |{bar:<10}| {checks} checks')
+              conn.close()
+          "

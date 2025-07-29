@@ -1,74 +1,112 @@
 #!/usr/bin/env python3
-import os, json, requests, smtplib, argparse, socket
+import os, json, requests, sqlite3, argparse
 from bs4 import BeautifulSoup
 from datetime import datetime
-from email.mime.text import MIMEText
-from email.header import Header
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from requests.exceptions import HTTPError
 import time
 
-# ─── Load ENV & Config ────────────────────────────────────────────────────────
-load_dotenv()
+# ─── Database Setup ────────────────────────────────────────────────────────
+DATABASE_FILE = os.path.join(os.path.dirname(__file__), 'store_status.db')
 
-# In GitHub Actions, environment variables are available directly
-# Don't try to "clean" them if they contain the actual values
-def get_env_var(var_name, default=None):
-    value = os.environ.get(var_name, default)
-    if value and value != default:
-        # Only clean if it looks like it needs cleaning (has quotes, etc.)
-        if value.startswith('"') and value.endswith('"'):
-            return value[1:-1]  # Remove quotes
-        if value.startswith("'") and value.endswith("'"):
-            return value[1:-1]  # Remove quotes
-        return value.strip()  # Just strip whitespace
-    return default
+def init_database():
+    """Initialize SQLite database with required tables"""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    
+    # Create stores table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS stores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL UNIQUE,
+            platform TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create status_checks table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS status_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            store_id INTEGER,
+            is_online BOOLEAN NOT NULL,
+            checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            response_time_ms INTEGER,
+            error_message TEXT,
+            FOREIGN KEY (store_id) REFERENCES stores (id)
+        )
+    ''')
+    
+    # Create summary_reports table for hourly summaries
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS summary_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            total_stores INTEGER NOT NULL,
+            online_stores INTEGER NOT NULL,
+            offline_stores INTEGER NOT NULL,
+            online_percentage REAL NOT NULL,
+            report_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    print("✅ Database initialized successfully")
 
-def get_int_env_var(var_name, default):
-    value = get_env_var(var_name, str(default))
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return default
+def get_or_create_store(cursor, name, url):
+    """Get store ID or create new store record"""
+    platform = "foodpanda" if "foodpanda.ph" in url else "grabfood"
+    
+    # Try to find existing store
+    cursor.execute("SELECT id FROM stores WHERE url = ?", (url,))
+    result = cursor.fetchone()
+    
+    if result:
+        return result[0]
+    
+    # Create new store
+    cursor.execute(
+        "INSERT INTO stores (name, url, platform) VALUES (?, ?, ?)",
+        (name, url, platform)
+    )
+    return cursor.lastrowid
 
-# Get configuration directly from environment
-TO_ADDRESS   = get_env_var('TO_ADDRESS')
-FROM_ADDRESS = get_env_var('SMTP_USER') 
-SMTP_CONFIG  = {
-    'host': get_env_var('SMTP_HOST', 'smtp.gmail.com'),
-    'port': get_int_env_var('SMTP_PORT', 587),
-    'user': get_env_var('SMTP_USER'),
-    'pass': get_env_var('SMTP_PASS'),
-}
+def save_status_check(store_id, is_online, response_time_ms=None, error_message=None):
+    """Save individual store status check to database"""
+    import time
+    max_retries = 5
+    
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(DATABASE_FILE, timeout=30)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO status_checks (store_id, is_online, response_time_ms, error_message)
+                VALUES (?, ?, ?, ?)
+            ''', (store_id, is_online, response_time_ms, error_message))
+            
+            conn.commit()
+            conn.close()
+            return  # Success!
+            
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                print(f"  ⚠️ Database locked, retrying in {attempt + 1} seconds...")
+                time.sleep(attempt + 1)
+                continue
+            else:
+                print(f"  ❌ Database error: {e}")
+                if 'conn' in locals():
+                    conn.close()
+                break
 
-# Debug output - mask sensitive info for logs but verify we have values
-print("=== CONFIGURATION DEBUG ===")
-print(f"TO_ADDRESS exists: {bool(TO_ADDRESS)}")
-print(f"SMTP_HOST exists: {bool(SMTP_CONFIG['host'])}")
-print(f"SMTP_PORT: {SMTP_CONFIG['port']}")
-print(f"SMTP_USER exists: {bool(SMTP_CONFIG['user'])}")
-print(f"SMTP_PASS exists: {bool(SMTP_CONFIG['pass'])}")
-
-if SMTP_CONFIG['pass']:
-    print(f"SMTP_PASS length: {len(SMTP_CONFIG['pass'])}")
-    # Show first/last char to verify it's not literally "***" 
-    if len(SMTP_CONFIG['pass']) > 6:
-        print(f"SMTP_PASS sample: '{SMTP_CONFIG['pass'][0]}...{SMTP_CONFIG['pass'][-1]}'")
-
-print("==============================\n")
-
-# Check if we have all required config
-missing = []
-if not TO_ADDRESS: missing.append('TO_ADDRESS')
-if not SMTP_CONFIG['host']: missing.append('SMTP_HOST')  
-if not SMTP_CONFIG['user']: missing.append('SMTP_USER')
-if not SMTP_CONFIG['pass']: missing.append('SMTP_PASS')
-
-if missing:
-    print(f"❌ Missing required environment variables: {missing}")
-    print("Check your GitHub Secrets configuration!")
-    exit(1)
+def save_summary_report(total_stores, online_stores, offline_stores):
+    """Save hourly summary report"""
+    # This function is now handled in main() to avoid multiple connections
+    pass
 
 # Load store URLs
 BRANCH_FILE = os.path.join(os.path.dirname(__file__), 'branch_urls.json')
@@ -83,8 +121,11 @@ HEADERS = {
     )
 }
 
-# ─── Status Check ──────────────────────────────────────────────────────────────
+# ─── Status Check (ORIGINAL WORKING LOGIC) ──────────────────────────────────────
 def check_store_online(url):
+    """Check if store is online using ORIGINAL WORKING LOGIC"""
+    start_time = time.time()
+    
     if 'foodpanda.ph' in url:
         try:
             with sync_playwright() as p:
@@ -106,156 +147,156 @@ def check_store_online(url):
                 for indicator in closed_indicators:
                     if page.query_selector(indicator):
                         browser.close()
-                        return False
+                        response_time = int((time.time() - start_time) * 1000)
+                        return False, response_time, "Store shows as closed"
                         
                 browser.close()
-                return True
+                response_time = int((time.time() - start_time) * 1000)
+                return True, response_time, None
+                
         except Exception as e:
+            response_time = int((time.time() - start_time) * 1000)
             print(f"  ⚠️  Playwright error: {e}")
-            return False
+            return False, response_time, str(e)
     else:
-        # GrabFood
+        # GrabFood - ORIGINAL WORKING LOGIC
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            r.raise_for_status()
-            
-            soup = BeautifulSoup(r.text, 'html.parser')
-            
-            # Check for various closed indicators
-            closed_indicators = [
-                lambda tag: tag.name in ['div','span','p'] and 'closed' in tag.get_text(strip=True).lower(),
-                lambda tag: tag.get('class') and any('closed' in str(c).lower() for c in tag.get('class')),
-                lambda tag: 'temporarily unavailable' in tag.get_text(strip=True).lower(),
-                lambda tag: 'not available' in tag.get_text(strip=True).lower()
-            ]
-            
-            for indicator in closed_indicators:
-                if soup.find(indicator):
-                    return False
-                    
-            return True
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp.raise_for_status()
+        except HTTPError:
+            response_time = int((time.time() - start_time) * 1000)
+            return False, response_time, "HTTP error"
         except Exception as e:
-            print(f"  ⚠️  Request error: {e}")  
-            return False
+            response_time = int((time.time() - start_time) * 1000)
+            print(f"  ⚠️  Request error: {e}")
+            return False, response_time, str(e)
+
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # ORIGINAL DETECTION LOGIC
+        banner = soup.select_one('.status-banner')
+        if banner and 'closed' in banner.get_text(strip=True).lower():
+            response_time = int((time.time() - start_time) * 1000)
+            return False, response_time, "Status banner shows closed"
+        
+        response_time = int((time.time() - start_time) * 1000)
+        return True, response_time, None
 
 # ─── Reporting ────────────────────────────────────────────────────────────────
-def build_report(results):
+def print_summary_report(results):
+    """Print a nice summary to console"""
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    online  = [(n,u) for n,u,o in results if o]
-    offline = [(n,u) for n,u,o in results if not o]
+    online  = [r for r in results if r[2]]  # r[2] is is_online
+    offline = [r for r in results if not r[2]]
 
-    lines = [
-        f"🏷️  CocoPan Store Status Report — {now}",
-        f"Total stores checked: {len(results)}",
-        f"✅ Online:  {len(online)}",
-        f"❌ Offline: {len(offline)}",
-        "",
-        "🟢 Online branches:",
-    ]
-    
-    for name, url in online:
-        lines.append(f"- [{name}]({url})")
-
-    lines += ["", "🔴 Offline branches:"]
-    for name, url in offline:
-        lines.append(f"- [{name}]({url})")
-
-    return "\n".join(lines)
-
-def test_smtp_connection():
-    """Test SMTP connection"""
-    try:
-        print(f"🔍 Testing SMTP connection...")
-        with smtplib.SMTP(SMTP_CONFIG['host'], SMTP_CONFIG['port']) as s:
-            print("✅ Connected to SMTP server")
-            s.starttls()
-            print("✅ TLS enabled")
-            s.login(SMTP_CONFIG['user'], SMTP_CONFIG['pass'])
-            print("✅ Authentication successful")
-            return True
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"❌ Authentication failed: {e}")
-        print("🔧 Check your Gmail App Password!")
-        return False
-    except Exception as e:
-        print(f"❌ SMTP connection failed: {e}")
-        return False
-
-def send_email(subject, body):
-    """Send email"""
-    try:
-        msg = MIMEText(body, _charset='utf-8')
-        msg['Subject'] = Header(subject, 'utf-8')
-        msg['From'] = FROM_ADDRESS
-        msg['To'] = TO_ADDRESS
-        
-        with smtplib.SMTP(SMTP_CONFIG['host'], SMTP_CONFIG['port']) as s:
-            s.starttls()
-            s.login(SMTP_CONFIG['user'], SMTP_CONFIG['pass'])
-            s.send_message(msg)
-            print(f"✅ Email sent to {TO_ADDRESS}")
-            return True
-    except Exception as e:
-        print(f"❌ Failed to send email: {e}")
-        raise
-
-# ─── Main ────────────────────────────────────────────────────────────────────
-def main(dry_run=False):
-    print(f"🏪 Starting CocoPan store status check...")
-    print(f"📋 Checking {len(STORE_URLS)} stores...\n")
-    
-    results = []
-    for i, url in enumerate(STORE_URLS, 1):
-        print(f"🔍 Checking store {i}/{len(STORE_URLS)}: {url}")
-        
-        # Get store name
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            r.raise_for_status()
-            h1_tag = BeautifulSoup(r.text,'html.parser').select_one('h1')
-            name = h1_tag.get_text(strip=True) if h1_tag else None
-            if not name or name.lower() == '403 error':
-                name = None
-        except Exception:
-            name = None
-            
-        if not name:
-            slug = url.rstrip('/').split('/')[-1] 
-            name = slug.replace('-', ' ').title()
-
-        online = check_store_online(url)
-        status = "🟢 ONLINE" if online else "🔴 OFFLINE"
-        print(f"  📊 {name}: {status}")
-        results.append((name, url, online))
-
-    # Generate report
-    report = build_report(results)
     print("\n" + "="*60)
-    print("📋 FINAL REPORT:")
+    print(f"🏷️  CocoPan Store Status Report — {now}")
     print("="*60)
-    print(report)
+    print(f"📊 Total stores checked: {len(results)}")
+    print(f"✅ Online:  {len(online)}")
+    print(f"❌ Offline: {len(offline)}")
+    print(f"📈 Online Rate: {len(online)/len(results)*100:.1f}%")
     print("="*60)
     
-    if dry_run:
-        print("\n🧪 DRY RUN - Report generated but not emailed")
-    else:
-        print(f"\n📤 Sending email...")
-        send_email("🏪 CocoPan Store Status Report", report)
+    if offline:
+        print("🔴 Offline stores:")
+        for name, url, _, _, _ in offline:
+            short_name = name.replace('Cocopan ', '').replace('- ', '')
+            print(f"  ❌ {short_name}")
+    
+    if online:
+        print(f"🟢 Online stores: {len(online)} (showing first 5)")
+        for name, url, _, _, _ in online[:5]:
+            short_name = name.replace('Cocopan ', '').replace('- ', '')
+            print(f"  ✅ {short_name}")
+        if len(online) > 5:
+            print(f"  ... and {len(online) - 5} more")
+
+# ─── Main Function ────────────────────────────────────────────────────────────
+def main():
+    print(f"🏪 Starting CocoPan store status check...")
+    print(f"📋 Checking {len(STORE_URLS)} stores...")
+    print(f"💾 Saving data to database for dashboard\n")
+    
+    # Initialize database
+    init_database()
+    
+    # Use single connection for all operations
+    conn = None
+    try:
+        conn = sqlite3.connect(DATABASE_FILE, timeout=30)
+        cursor = conn.cursor()
+        
+        results = []
+        for i, url in enumerate(STORE_URLS, 1):
+            print(f"🔍 Checking store {i}/{len(STORE_URLS)}: {url}")
+            
+            # Get store name
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=10)
+                r.raise_for_status()
+                h1_tag = BeautifulSoup(r.text,'html.parser').select_one('h1')
+                name = h1_tag.get_text(strip=True) if h1_tag else None
+                if not name or name.lower() == '403 error':
+                    name = None
+            except Exception:
+                name = None
+                
+            if not name:
+                slug = url.rstrip('/').split('/')[-1] 
+                name = slug.replace('-', ' ').title()
+
+            # Check store status
+            is_online, response_time, error_msg = check_store_online(url)
+            status = "🟢 ONLINE" if is_online else "🔴 OFFLINE"
+            print(f"  📊 {name}: {status} ({response_time}ms)")
+            
+            # Store in database using existing connection
+            store_id = get_or_create_store(cursor, name, url)
+            cursor.execute('''
+                INSERT INTO status_checks (store_id, is_online, response_time_ms, error_message)
+                VALUES (?, ?, ?, ?)
+            ''', (store_id, is_online, response_time, error_msg))
+            
+            results.append((name, url, is_online, response_time, error_msg))
+
+        # Commit all changes at once
+        conn.commit()
+        
+        # Save summary report
+        online_count = sum(1 for _, _, is_online, _, _ in results if is_online)
+        offline_count = len(results) - online_count
+        
+        online_percentage = (online_count / len(results) * 100) if len(results) > 0 else 0
+        cursor.execute('''
+            INSERT INTO summary_reports (total_stores, online_stores, offline_stores, online_percentage)
+            VALUES (?, ?, ?, ?)
+        ''', (len(results), online_count, offline_count, online_percentage))
+        
+        conn.commit()
+        
+    except Exception as e:
+        print(f"❌ Database error: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+
+    # Print summary
+    print_summary_report(results)
+    
+    print(f"\n💾 Data saved to database!")
+    print(f"📊 Launch dashboard: streamlit run dashboard.py")
+    print(f"🌐 View at: http://localhost:8501")
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--dry-run", action="store_true",
-                   help="Print the report instead of sending")
-    p.add_argument("--test-config", action="store_true", 
-                   help="Test configuration only")
+    p = argparse.ArgumentParser(description="CocoPan Store Monitor - Database Only")
+    p.add_argument("--init-only", action="store_true", help="Just initialize database")
     args = p.parse_args()
     
-    if args.test_config:
-        print("🔧 Testing configuration...")
-        if test_smtp_connection():
-            print("✅ Configuration test passed!")
-        else:
-            print("❌ Configuration test failed!")
-            exit(1)  
+    if args.init_only:
+        init_database()
+        print("✅ Database initialized only")
     else:
-        main(dry_run=args.dry_run)
+        main()
