@@ -1,4 +1,4 @@
-name: CocoPan Store Monitor (6am-9pm) - Dashboard Only
+name: CocoPan Store Monitor (6am-9pm Manila) - Production Ready
 
 on:
   schedule:
@@ -12,20 +12,22 @@ on:
 jobs:
   monitor-stores:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Prevent hanging workflows
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 python-dotenv playwright
-          playwright install chromium
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
 
       - name: Download previous database (if exists)
         uses: actions/download-artifact@v4
@@ -34,21 +36,40 @@ jobs:
           path: .
         continue-on-error: true
 
-      - name: Run store monitoring and save to database
+      - name: Show pre-run status
         run: |
-          echo "🏪 Running hourly CocoPan store check..."
-          echo "⏰ Time: $(date)"
-          python store_status_report.py
+          echo "🏪 CocoPan Store Monitor Starting"
+          echo "⏰ Manila Time: $(TZ='Asia/Manila' date)"
+          echo "🌍 UTC Time: $(date -u)"
+          if [ -f "store_status.db" ]; then
+            echo "📊 Found existing database"
+          else
+            echo "📊 Starting with fresh database"
+          fi
 
-      - name: Show monitoring summary
+      - name: Run store monitoring
         run: |
-          echo "📊 Latest monitoring summary:"
+          echo "🔍 Checking all CocoPan stores..."
+          python store_status_report.py
+          
+          # Verify database was created/updated
+          if [ -f "store_status.db" ]; then
+            echo "✅ Monitoring completed successfully"
+          else
+            echo "❌ Database not found after monitoring"
+            exit 1
+          fi
+
+      - name: Show monitoring results
+        run: |
+          echo "📊 Monitoring Results:"
           python -c "
-          import sqlite3
-          import os
+          import sqlite3, os
           if os.path.exists('store_status.db'):
               conn = sqlite3.connect('store_status.db')
               cursor = conn.cursor()
+              
+              # Get latest summary
               cursor.execute('SELECT * FROM summary_reports ORDER BY report_time DESC LIMIT 1')
               result = cursor.fetchone()
               if result:
@@ -56,6 +77,12 @@ jobs:
                   print(f'✅ Online: {result[2]}')
                   print(f'❌ Offline: {result[3]}')
                   print(f'📈 Uptime: {result[4]:.1f}%')
+              
+              # Count recent checks
+              cursor.execute('SELECT COUNT(*) FROM status_checks WHERE datetime(checked_at) > datetime(\"now\", \"-1 hour\")')
+              recent = cursor.fetchone()[0]
+              print(f'🔄 Recent checks: {recent}')
+              
               conn.close()
           else:
               print('❌ No database found')
@@ -66,48 +93,12 @@ jobs:
         with:
           name: store-database
           path: store_status.db
-          retention-days: 30
+          retention-days: 90  # Keep for 3 months
+          compression-level: 6
+        if: always()  # Upload even if previous steps failed
 
-      - name: Display database stats
+      - name: Workflow completion
         run: |
-          echo "📊 Database Statistics:"
-          python -c "
-          import sqlite3
-          import os
-          if os.path.exists('store_status.db'):
-              conn = sqlite3.connect('store_status.db')
-              cursor = conn.cursor()
-              cursor.execute('SELECT COUNT(*) FROM stores')
-              stores = cursor.fetchone()[0]
-              cursor.execute('SELECT COUNT(*) FROM status_checks')
-              checks = cursor.fetchone()[0]
-              cursor.execute('SELECT COUNT(DISTINCT DATE(checked_at)) FROM status_checks')
-              days = cursor.fetchone()[0]
-              print(f'📁 Total stores tracked: {stores}')
-              print(f'📈 Total checks performed: {checks}')
-              print(f'📅 Days of data: {days}')
-              conn.close()
-          "
-
-      - name: Show recent activity pattern
-        run: |
-          echo "⏰ Recent hourly pattern:"
-          python -c "
-          import sqlite3
-          import os
-          if os.path.exists('store_status.db'):
-              conn = sqlite3.connect('store_status.db')
-              cursor = conn.cursor()
-              cursor.execute('''
-                  SELECT strftime('%H', checked_at) as hour, COUNT(*) as checks
-                  FROM status_checks 
-                  WHERE checked_at >= datetime('now', '-24 hours')
-                  GROUP BY hour
-                  ORDER BY hour
-              ''')
-              results = cursor.fetchall()
-              for hour, checks in results:
-                  bar = '█' * min(checks // 5, 10)
-                  print(f'{hour}:00 |{bar:<10}| {checks} checks')
-              conn.close()
-          "
+          echo "✅ CocoPan monitoring workflow completed"
+          echo "⏰ Completed at: $(TZ='Asia/Manila' date)"
+          echo "🔄 Next run: In 1 hour (if within 6am-9pm Manila time)"

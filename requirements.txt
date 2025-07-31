@@ -5,4 +5,4 @@ playwright
 streamlit
 plotly
 pandas
-sqlite3
+pytz
