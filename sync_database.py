@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CocoPan Database Sync - Download latest database from GitHub Actions
-Repository: juanlopolicarpio/cocopan-online-checker
+Repository: juanlopolicaarpio/cocopan-online-checker (FIXED TYPO)
 """
 import requests
 import zipfile
@@ -9,8 +9,8 @@ import os
 import sys
 from datetime import datetime
 
-# Your GitHub Configuration (PRE-CONFIGURED)
-GITHUB_USERNAME = "juanlopolicarpio"
+# FIXED: Corrected repository name with double 'a'
+GITHUB_USERNAME = "juanlopolicaarpio"  # Fixed: double 'a' 
 GITHUB_REPO = "cocopan-online-checker"
 GITHUB_TOKEN = None  # Add personal access token here if repo becomes private
 
@@ -33,6 +33,7 @@ def download_latest_database():
     
     try:
         print("🔍 Searching for latest database from GitHub Actions...")
+        print(f"📂 Repository: {GITHUB_USERNAME}/{GITHUB_REPO}")
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
@@ -47,7 +48,7 @@ def download_latest_database():
         if not database_artifacts:
             print("❌ No database artifacts found or all have expired")
             print("💡 Make sure GitHub Actions has run at least once")
-            print("🔗 Check: https://github.com/juanlopolicarpio/cocopan-online-checker/actions")
+            print(f"🔗 Check: https://github.com/{GITHUB_USERNAME}/{GITHUB_REPO}/actions")
             return False
             
         # Get the most recent one
@@ -56,6 +57,7 @@ def download_latest_database():
         print(f"📦 Found database artifact:")
         print(f"   📅 Created: {latest_artifact['created_at']}")
         print(f"   💾 Size: {latest_artifact['size_in_bytes']:,} bytes")
+        print(f"   🆔 ID: {latest_artifact['id']}")
         
         # Download the artifact
         download_url = latest_artifact["archive_download_url"]
@@ -118,7 +120,11 @@ def download_latest_database():
             
     except requests.exceptions.RequestException as e:
         print(f"❌ Network error: {e}")
-        print("💡 Check your internet connection")
+        if "404" in str(e):
+            print("💡 Repository not found - check username/repo name spelling")
+            print(f"🔗 Verify at: https://github.com/{GITHUB_USERNAME}/{GITHUB_REPO}")
+        else:
+            print("💡 Check your internet connection")
         return False
     except KeyError as e:
         print(f"❌ GitHub API response error: {e}")
@@ -151,7 +157,7 @@ def main():
         print()
         print("💡 Troubleshooting:")
         print("   • Make sure GitHub Actions has run at least once")
-        print("   • Check: https://github.com/juanlopolicarpio/cocopan-online-checker/actions")
+        print(f"   • Check: https://github.com/{GITHUB_USERNAME}/{GITHUB_REPO}/actions")
         print("   • Verify your internet connection")
         print("   • If repository is private, add GitHub token to this script")
 
